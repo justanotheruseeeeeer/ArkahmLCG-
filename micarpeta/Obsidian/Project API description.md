@@ -1,0 +1,131 @@
+# Arkham Horror LCG — Card Miner Project Briefing
+
+## What this project is
+We are building a card parser ("miner") for the Arkham Horror LCG card game.
+It fetches cards from the ArkhamDB API and converts their text into structured
+numerical parameters that feed a genetic algorithm / simulator.
+
+The miner lives in `miner_v3.py` (attached). Three standalone "chunks" extend it:
+- `chunk1_succeed_by.py` — succeed-by averaging for conditional damage/clues
+- `chunk2_add_red_duration.py` — add / add_stat / red / duration parameters
+- `chunk3_multi_icons.py` — test_stat extraction and icon computation
+
+All four files are attached. Please read them before responding.
+
+---
+
+## Key design decisions already locked in
+
+### Type hierarchy
+`skill` | `pseudo_skill` | `event` | `asset` | `pseudo_asset`
+
+**pseudo_skill** = fast event triggering on test result (Lucky!, Oops!, LWTF).
+AcP = 0 mostly. Conditions assumed fulfilled.
+
+**pseudo_asset** = event that attaches or gains a charges pool (Barricade xp3).
+
+### Parameters (inside `Parameters` dict)
+| Key                   | Meaning                                                         |
+| --------------------- | --------------------------------------------------------------- |
+| dm                    | active damage per use (fight/attack actions)                    |
+| dm_react              | reaction damage (Guard Dog type)                                |
+| inv                   | clues per use (1=investigate action, N=more discover)           |
+| evade                 | 1 if card evades; fix=0 if test required, fix=1 if automatic    |
+| draw / search / res   | cards drawn / cards searched / resources gained                 |
+| heal_dmg / heal_hor   | damage / horror healed                                          |
+| soak_dmg / soak_hor   | passive soak from asset health/sanity                           |
+| fix                   | 1 if effect fires without a skill test                          |
+| charges / charge_cost | pool size / per-activation cost                                 |
+| exhaust_use           | True if card exhausts as cost (divides effects by 3)            |
+| add                   | literal +N numeric bonus to skill value                         |
+| add_stat              | stat being added to another ('wil','int','com','agi') — MoM xp2 |
+| red                   | shroud / difficulty reduction                                   |
+| duration              | how many tests/turns the add/red lasts                          |
+| stat_wil/int/com/agi  | permanent stat bonus from asset header                          |
+
+### AcP rules
+- Fast on play (any type) → +1
+- [fast] non-exhaust on asset → +1
+- [fast] or [reaction] exhaust on asset → +1
+- connecting location = bonus move (not sole purpose) → +1
+- sole-move exhaust ([fast]+exhaust, whole effect is the move) → +0.33
+- additional actions → +N (÷3 if exhaust)
+- pseudo_skill → -1 (if triggers on fail)
+
+### Succeed-by logic (chunk1)
+- sb ≥ 2: average base with base+bonus → dm or inv = (base + base+bonus) / 2
+- sb ≥ 1: no halving (treat as always true)
+- "each point you succeeded by" → cap/2 if capped, else default×2
+
+### Add/red logic (chunk2)
+- `add`: literal number from "+N [stat]" or "+N to a skill"
+- `add_stat`: stat key from "add your [stat] to your [stat]" (no literal number)
+- "in place of" (MoM xp0) → neither add nor add_stat fires (stat substitution, handled by chunk3)
+- duration: this_test=1, next_test=1, rest_of_turn=3, end_of_phase=3, end_of_round=3, default=2
+
+### Test-stat logic (chunk3)
+- "uses [stat] instead of [other]" → test_stats = {stat being used}
+- "add [stat] to [stat]" + action verb present → test_stats = {both stats}
+- Global modifiers ("until end of round") WITHOUT action verb → test_stats = set()
+- Icons = sum of pips for each test_stat + wild pips
+
+### Charge accounting
+- explicit uses(N): use N
+- exhaust asset, no uses(): 7 × 3 = 21
+- non-exhaust asset, no uses(): 7
+- event / skill / pseudo_skill: 1
+
+---
+
+## What has been tested and verified (regression suite)
+All 34 "hard cards" from `test_v3.py` pass. The integrated test in
+`test_chunks_integrated.py` covers 44 cases across all three chunks — all pass.
+
+Known tricky cards (already handled correctly):
+- MoM xp0: stat sub global → test_stats=set(), no add/red fires
+- MoM xp2: add_stat='int' dur=3, test_stats=set() (no action verb)
+- Beat Cop: discard-cost ability → ignored, stat only
+- Necronomicon: 4 [fast] choices weighted average (1+2+3+4=10 total cost)
+- Pathfinder: [fast]+exhaust+sole-move → AcP=1.333 
+- Cat Burglar: [action]+exhaust+disengage+move → AcP=0.333 (bonus move)
+- LWTF: pseudo_skill, fixed discover 2 → inv=2 fix=1 (not zeroed by skill correction)
+
+---
+
+## What needs to happen next
+
+**TASK:** Mass-test miner_v3 + chunks 1/2/3 against real card outputs.
+
+The user will paste batches of card JSON from their local `library_mystic.json`
+(generated by running `python3 miner_v3.py`). For each batch:
+1. Read the card output
+2. Check each parameter against expected values
+3. Flag any suspicious result with a brief explanation
+4. Group failures by cause (which regex path is wrong)
+
+Cards to check are listed in `mass_test_150_cards.md` (attached if available,
+otherwise ask the user to paste it).
+
+### What "suspicious" means for each parameter
+| Parameter | Flag if... |
+|-----------|-----------|
+| dm | 0 on a fight/attack card; >4 on a non-AoE card |
+| inv | 0 on an investigate event; >3 without "discover N clues" |
+| evade | 1 on a card with no evade/evasion text |
+| fix | 1 on a card with "investigate." (test required); 0 on "discover N clues" |
+| AcP | 0 on a clearly fast event; >2 on a non-action-granting card |
+| charges | 0 on an asset with no uses() and no exhaust; >21 on any card |
+| add | >0 on a card with no "+N" boost text |
+| add_stat | not None on MoM xp0 (should be None) |
+| duration | >0 on a card with no add/red effect |
+
+---
+
+## Files attached
+- `miner_v3.py` — main miner (read this first)
+- `chunk1_succeed_by.py` — succeed-by logic
+- `chunk2_add_red_duration.py` — add/red/duration logic
+- `chunk3_multi_icons.py` — test_stat and icons logic
+- `mass_test_150_cards.json` — the card list
+
+Please read all attached files before asking any clarifying questions.
